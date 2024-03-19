@@ -1,0 +1,128 @@
+\tianyin{This section is quite unclear. What is the fundamental problem here? It should be the semantic gap, but somehow the section argues a bunch of other things, e.g., proxy metrics. Organize the fundamental limitation in the preamble followed by the resulting limitations (e.g., the need to restart and the slow response).
+I think we should break this section into two: the first part should be merged to related work. The second part should be merged into 2.3.}
+
+Currently vertical autoscalers employ various techniques \cite{lorido-botran_review_2014,qu_auto-scaling_2018} to dynamically tune CPU entitlement based on system as well as application behavior. These approaches include: (a) Rules and threshold-based \cite{edb-msft_autoscale_2023,noauthor_aws_nodate}, (b) statistical models \cite{noauthor_kubernetes_nodate,sachidananda_collective_2022,rattihalli_exploring_2019}, (c) Time series / Machine Learning / Reinforcement learning techniques \cite{qiu_firm_nodate,wang_predicting_2021,rzadca_autopilot_2020, wang_autothrottle_2023}, (d) Based on queuing theory \cite{fried_caladan_2020, ali-eldin_adaptive_2012, ousterhout_shenango_2019}, and (e) Performance aware models~\cite{bhardwaj_cilantro_2023}. 
+
+All of these approaches above employ the use of proxy metrics (CPU utilization, throttle count, queue lengths) to estimate application behavior, with some approaches utilizing a combination of them. \tianyin{still don't really understand why it's a problem.} Approaches (a), (b), and (c) use CPU utilization as their proxy metric, wherein approaches like (b) and (c) often use heavy-weight algorithms which can lead to sluggish reactivity (several minutes) on load changes. 
+\tianyin{being slow is a problem; but using proxy metrics is not.} Approaches like (d), which employ queuing lengths, are often great at identifying variations in terms of response times from their SLO; however, they often lead to imprecise recommendations in terms of whole cores or fractional cores increasing in a step function. The CPU slack caused by this is often unacceptable to cloud customers who require and pay for the precision of the fractional cores. Newer approaches that seek to eliminate the use of proxy metrics, such as (e), model based on logging the real-time performance of applications, also suffer from similar problems of reactivity and precision. \tianyin{too unstructured; hard to read. each paragraph should only make one point.}
+
+Along with the shortcomings of reactivity and precision from the approaches described above, there is a fundamental disconnect between the CPU entitlement recommended derived from the use of proxy metrics and the OS interface \tianyin{Isn't this the first and foremost problem?! the paper should be built on top of that argument, rather than along with that.}, which requires CPU limits to be set as a function of bandwidth. As described in Section \ref{sec:Background}, cloud applications set the CPU limits in terms of millicores of vCPUs, whereas within the OS, limits are set in terms of quota and period CPU bandwidth time. All the current state-of-the-art autoscaling approaches only tune for quota while keeping the period constant (default 100 ms). We classify all the proxy metrics-based approaches mentioned above as quota-only models. Approaches (a), (b), and (c) tune the ratio of quota/period to be equal to the CPU utilization percentage recommended by the algorithm. Approaches (d) and (e) tune for quota either in terms of giving an additional CPU worth of runtime or can employ fractional scaling of quota based on the load it measures from its performance metrics.
+
+The use of quota-only models leads to several problems. Firstly, not all ratios are created equal. For example, when an application requests for 500 millicores or 0.5 vCPU in terms of quota and period, that can theoretically translate to quota=50ms and period=100ms, or quota=5ms and period=10ms, and both are treated equally in terms of CPU limits and cost the same to the cloud customer. While overall CPU time granted to the application will be near identical, the bursts in which the runtime is granted will vary significantly. Anecdotal evidence \cite{noauthor_avoid_nodate,noauthor_runtime_nodate} suggests significant regressions to performance and cost when the application periodic behavior of bursty or long running isn't taken into account. Therefore, applications that do not conform into the default 100 ms period are significantly disadvantaged in terms of over-entitlement (slack) if the periodicity is greater, or in terms of performance if their periodicity is lower than the default, or likely both.
+
+%In the following subsection, 
+% \paragraph{Measuring quota-only models.}
+We demonstrate the limitation of quota-only models using the Ebizzy micro-benchmark that simulates a web search workload~\cite{henson_ebizzy_2008}. \tianyin{need to justify this benchmark more --- I never heard of it before.}
+%a regularly behaving microbenchmark and 
+We tune the CPU entitlement using the Kubernetes VPA that use CPU utilization as its proxy metric (\S\ref{sec:}).
+% , which employs CPU utilization as its proxy metric. While there are other proxy metric-based approaches that outperform tuning of quota for more irregular workloads, for a workload with a regular runtime pattern, the K8s VPA performs comparably to its counterparts and achieves optimal performance. 
+The goal of the experiment is to show the effects not tuning period which can lead to performance and efficiency regressions, as well as the incorrect estimation of quota, which can further cause performance degradation.
+
+% Please add the following required packages to your document preamble:
+\begin{table*}[]
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|lllll|l}
+
+\textbf{Categories} & \textbf{Rules} & \textbf{Statistics} & \textbf{ML/RL} & \textbf{Queuing} & \textbf{Performance} & \textbf{CATCloud} \\
+\hline
+Primary Metric & CPU Util, throttle & CPU Util, throttle & CPU Util, throttle & Queue congestion & SLOs & Runtime in scheduler \\
+\hline
+Reactivity & \cmark & \cmark & \xmark & \cmark & \xmark & \cmark \\
+\hline
+\begin{tabular}[c]{@{}l@{}}Ability to Partially tune\\ CPUs w/o stepping\end{tabular} & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark \\
+\hline
+Accuracy in quota tuning & \xmark & \xmark & \cmark & \xmark & \cmark & \cmark \\
+\hline
+quota-period combo & \xmark & \xmark & \xmark & \xmark & \xmark & \cmark 
+\end{tabular}%
+}
+\caption{Vertical CPU autoscaling techniques comparison}\label{VPA-table}
+\label{tab:my-table}
+\end{table*}
+
+% \subsection{Limitations of quota-only models}
+% \label{sec:limitations_quota_only}
+% We demonstrate the inefficiency of quota-only models using a micro-% benchmark: ebizzy \cite{henson_ebizzy_2008} that simulates a web-search like workload. 
+
+We use an altered variant of this benchmark \cite{bhat_pratiksampatsleeping-ebizzy_2014} that introduces a sleep-wakeup patterns to display burstiness. Take an example of a workload that generally takes 15-20 ms to complete and post that is idle for 150ms. We compare against the Kubernetes VPA that employs CPU utilization as the proxy metric. CPU utilization is calculated by extracting accumulated runtime within a given period. Over a period of sliding windows K8s VPA computes 50/90/95 percentiles of CPU utilization and based on workload characteristics recommends the quota for the future inline with past CPU utilization percentage.
+
+% \begin{figure}[h]
+% \centering
+% \includegraphics[scale=0.41]{paper/Figures/Sleeping Ebizzy microbenchmark - lower is better.png}
+% \caption{Ebizzy micro-benchmark - 20 ms work 150 ms idle.
+% \tianyin{need to show the resource figure also otherwise it looks like VPA is perfect.}
+% \pratik{ack.}}
+% \end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{paper/Figures/Motivation/ebizzy_1.png}
+    \caption{Ebizzy micro-benchmark - 20 ms work 150 ms idle - Normalized \tianyin{write the conclusion in the caption}} \label{fig:mot_ebizzy1}
+    \end{figure}
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=1\linewidth]{./Figures/Motivation/Ebizzy0/Sleeping Ebizzy microbenchmark CPUs - lower is better.png}
+%     \caption{Ebizzy micro-benchmark CPU entitlement (millicores) - 20 ms work 150 ms idle.}
+%     \end{figure}
+
+\paragraph{The needs of adjusting periods.}
+\tianyin{always start a paragraph with high-level points---what do you want to say in this paragraph?}
+As shown in figure \ref{fig:mot_ebizzy1}, we first observe the latency characteristics when the application is under-provisioned to 150 millicores. In this scenario, the response time is fairly larger. This delay stems from the application's behavior: it initially runs for 15ms, but then encounters throttling until the completion of a 100ms period. Only after this interval has elapsed does the application proceed to execute the remaining requested 5ms. 
+The second case is when the CPU limits are tuned based on a proxy metric like CPU utilization. We observe a sharp drop in latency, indicating the application is not heavily throttled anymore. This recommendation is akin to that suggested by the Kubernetes VPA. Even though optimal latency is achieved, since the workload behaviour is known, further optimizing for period can yield better CPU allocation. Therefore in the third case, since the idle duration of 150ms is known, the ideal periodicity of the application is runtime + idle time = 170ms. This new quota = 20ms, period = 170 ms when manually tuned within the Cgroup forms the ratio of 120 millicores, is a 40\% decrease in CPU limits when compared to the former.
+
+The problem of quota-only models is not that they only incorrectly tune for period \tianyin{huhhh????}, but can also lead to incorrectly estimating of quota. To further demonstrate the consequences of making decisions for application runtime behavior in constant window, consider another scenario wherein a workload presents a uniform run-yield time behaviour of 40 ms runtime and 30 ms idle time. Assume the user sets the period = quota = 100 ms = 1000 millcores, which is sufficient for the current workload. From figure \ref{fig:runtime-idle-distro}, the period bound tracing algorithm functions as follows for the first three periods:
+\tianyin{Is this a speculative example or is it explain figure 2? The example should be place in background}
+\begin{itemize}
+    \item\textbf{1st period}: 40 ms runtime, 30 ms yield time, and 30 ms runtime => Cumulative runtime = 70 ms
+    \item\textbf{2nd period}: residual 10 ms runtime, 30 ms yield time, 40 ms runtime, and 20 ms yield time => Cumulative runtime = 50 ms
+    \item\textbf{3rd period}: residual 10 ms yield time, 40 ms runtime, 30 ms yield time, and 20 ms runtime => Cumulative runtime = 60 ms
+\end{itemize}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{paper/Figures/irregular_runtime_example.png}
+    \caption{Illustrative example - Runtime, idle-time distribution in 100ms period bound tracing.
+    \tianyin{put a comparison with the ideal configuration}\label{fig:runtime-idle-distro}}
+    \end{figure}
+
+Assuming our goal is to minimize CPU entitlement for maximal performance, in this case the CFS bandwidth controller limits must be set to a quota of 70ms and a period of 100ms, or 700 millicores. However, this approach will result in severely unused quota in periods 2 and 3. This over-provisioning of resources leads to a direct cost to consumer for the CPU that they may not use for the majority of its running time. In contrast, if the workload behaviour was well understood; the ideal entitlement would have a quota of 40ms and a period of (40+30)=70ms, or 570 millcores instead.
+
+Emulating the application behavior using sleeping ebizzy, we present latency characteristics in various CPU allocation scenarios (see Figure \ref{fig:mot_ebizzy2}). In the first case, we set the quota to be equivalent to the runtime of the program, i.e., 40 ms, while keeping the period constant. This results in poor performance in terms of latency, as explained in the preceding paragraph. However, steadily increasing the quota in subsequent runs leads to improved latency. As observed from the example, the lowest achievable latency is attained when the quota is set to 70 ms and the period to 100 ms, with the quota being the only variable adjusted. However, with knowledge of the application behavior, tuning the quota to 42 ms and the period to 70 ms also achieves minimal latency while imposing a lower CPU limit of 570 millicores instead of 700 millicores.
+
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[scale=0.41]{paper/Figures/Sleeping Ebizzy microbenchmark - lower is better_40_70.png}
+%     \caption{Ebizzy micro-benchmark - 40 ms work 30 ms idle}
+%     \end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{paper/Figures/Motivation/ebizzy_2.png}
+    \caption{Ebizzy micro-benchmark - 40 ms work 30 ms idle Normalized \tianyin{too tired and bored to read another configuration; this figure should go with Figure 2 hand in hand}} \label{fig:mot_ebizzy2}
+    \end{figure}
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=1\linewidth]{paper/Figures/Motivation/Ebizzy1/Sleeping Ebizzy microbenchmark CPUs - lower is better.png}
+%     \caption{Ebizzy micro-benchmark CPU entitlement (millicores) - 40 ms work 30 ms idle}
+%     \end{figure}
+
+
+% We summarize the limitations (Table \ref{VPA-table}) of the techniques used by the existing state-of-the-art vertical CPU autoscalers below:
+% \begin{itemize}
+%     \item\textbf{Use of Surrogate Metrics.} TODO
+%     \item\textbf{Heavy-weight Algorithms}
+%     \item\textbf{Precision.}
+%     \item\textbf{Fundamental disconnect between CPU entitlement and OS interface.}
+% \end{itemize}
+
+
+Numerous approaches summarized in Table \ref{VPA-table} have been developed to address a combination of shortcomings related to reactivity and precision. However, these approaches encounter a fundamental challenge of estimating runtime behavior, which remains opaque in the userspace. This inability to observe, coupled with the interface mismatch between the bandwidth controller and the cloud, results in inefficiencies when recommending accurate CPU limits for applications. This motivates the need to design a solution in the layer where collecting this information is fairly transparent - the OS scheduler; which processes data regarding an application thread's runtime, yield and throttle behavior. Given that the solution operates within the kernel's scheduler, it must not impose significant computational overhead. Additionally, it should possess the capability to bridge the interface gap between cloud orchestrators and the bandwidth controller.
+
+% In the next section describe the design of CATCloud, a light-weight in-kernel autoscaling solution to profile application behavior at the millisecond scale granularity and recommend accurate CPU limits to the userspace cloud applications on the fly.
+
+% These approaches that exist in userspace are at a fundamental disadvantage as 
+
+% In conclusion, current profiling tools rely on userspace proxy metrics of CPU utilization, throttle count, queue length, and other performance metrics to estimate the application behaviour due to the fact that runtime behavior is opaque to the userspace. This leads to several inefficiencies in recommending accurate CPU entitlement for applications. However, this information of how application threads are run, yielded and/or throttled is fairly transparent in the operating system. Therefore, this motivates the need for designing a light-weight in-kernel solution to profile application behavior and recommend accurate CPU entitlement on the fly.

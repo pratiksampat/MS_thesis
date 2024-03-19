@@ -1,0 +1,232 @@
+CATCloud is a vertical CPU autoscaling solution designed for applications that rely on Linux Cgroup CPU bandwidth controller to regulate utilization (e.g., containerized applications on multi-tenant cloud). Drawing from our previous discussion, where we highlighted the limitations of monitoring application behavior solely in userspace, we now bypass the necessity for userspace proxy metrics. Instead, we seamlessly integrate plug directly into the kernel scheduler to extract the operating system's view of the application, which is opaque to other autoscaling solutions. Residing in kernel space, CATCloud minimally instruments the Linux scheduler to trace and analyze application runtime behavior. It also extends the CPU Cgroup by exposing a userspace interface to finely tune the granularity of profiling by determining the length of observed history. In addition to profiling, CATCloud also exposes CPU entitlement recommendations and adjustments based on observed history and gives an option to automatically tune the CPU bandwidth based on these recommendations.
+
+\textbf{Design Goals}: CATCloud has three main design goals:
+\begin{itemize}
+    \item \textit{Correctness in capturing application behavior.} CATCloud must be able to accurately capture application runtime and idle-time behavior within the scheduler and must account for events such as throttle.
+    \item \textit{Lightweight profiling and recommendations.} Since CATCloud is designed as an extension to the OS scheduler, its profiling must be minimal, and the algorithm employed to analyze the application behavior must be computationally inexpensive.
+    \item \textit{Usability.} Users must be able to provide hints to tune the reactivity of tracing and recommendations, along with the ability to extract and apply recommendations on the fly. These userspace hints can help reduce the overheads of tracing as well as improve the quality of the recommendations. CATCloud must implement a userspace interface that is in tandem with the already established CPU Cgroup interface
+\end{itemize}
+
+\section{Overview}
+
+CATCloud's workflow comprises three essential components: profiling application behavior, analyzing collected runtime data, and deploying CPU entitlement recommendations. As discussed in Section 2, within a bandwidth-controlled environment, the combination of quota period and its ratio determines the CPU allocation for applications. In contrast to other autoscaling solutions, CATCloud fine-tunes both the quota and period parameters to achieve precise and efficient entitlement for the tasks within that cgroup.
+% During the profiling of application behavior, the existing approach involves monitoring CPU utilization, serving as an indicator of a specific application's overall runtime, and is consequently set as the quota. However, adjusting the period variable is challenging due to a lack of cognizance regarding application's periodicity.
+% \tianyin{This should be something in the background or even motivation.}
+
+
+Most VPAs rely on proxy metrics, often leading to ineffective profiling of application runtime and periodicity. This results in incorrect and inefficient CPU entitlement. CATCloud addresses this challenge by leveraging the Linux scheduler to profile each runqueue scheduled by the application's cgroup. Each runqueue records the duration it runs before yielding, storing both runtime and yield time in a history buffer. Simultaneously, a global view of the cgroup runtime within a period is gathered. Once the history buffer is filled with data from both per-runqueue and global cgroup views, CATCloud computes the worst-case run/yield times and recommends quota-period based on that. These recommendations are then exposed to the userspace via the CPU Cgroup. CATCloud's lightweight implementation in the OS enables millisecond-scale accounting, ensuring high reactivity when sudden load spikes and drops are observed.
+
+\section{Profiling}
+To accurately model the current application behavior, we need techniques to observe its runtime and yield interactions within the scheduler. As described in section \ref{sec:2.1}, the behavior of the request queue (RQ) during execution and yielding is fragmented (Figure \ref{fig:challenge}), primarily due to scheduler slices. This fragmentation complicates the distinction between actual runtime and involuntary yields. Consequently, we propose two strategies. Firstly, a strawman approach involves tracing runtime within a defined period. We discuss its similarities with existing tracing methodologies, its limitations, and its applicability in specific scenarios. Secondly, we introduce a novel tracing methodology capable of capturing application behavior agnostic to the period in which the runtime resides in.
+% We instrument the Linux bandwidth scheduler in order to trace the amount of runtime required by applications.
+
+% \tianyin{Try to elaborate the goal first---what exactly you want to measure and why?}
+% The general idea is to measure the amount of time an application runs for until it yields. \tianyin{Why you want to measure this? It's not all clear to me.} Quantifying this data over a period of time can then help us model the runtime behavior of applications.
+% \tianyin{What's the definition of an application's ``runtime behavior''? Be precise. Try to be verbose about the description because your readers do not know as much as you.}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.5\linewidth]{paper/Figures/tracing_challenge.png}
+\caption{Challenges with runtime tracing}
+\Description[Challenges with runtime tracing]{}
+\label{fig:challenge}
+\end{figure}
+
+% \tianyin{Elaborate the key challenge more. What it means, with regards to the solution, when the runtime is fragmented?}
+% However, runtime tracing is not as straightforward. The runtime for applications will not be granted as a contiguous quota due to various reasons such as scheduler context switches, vruntime slices, waiting for IO, etc.
+
+% Therefore, We design two tracing methodologies with complementing characteristics for extracting application runtime behavior.
+% \tianyin{It is weird to have two. As a reader, I only need to know one---the final product. You can have a strawman solution as a way to help readers understand the design challenging or as a way to build up the final solution. But it should not be two solutions and throw the ball to users to choose which one they should use.}
+
+\subsection{Period bound tracing - strawman solution}
+Similar to the CPU utilization monitoring approach described in Section 3, we design an in-kernel variant of the same. Our approach for period-bound tracing is simple: we account for cumulative runtime within a given period currently set by the cgroup controller. This approach can be viewed akin to the CPU utilization reported by container telemetry tools, with the key difference that the data is collected in-kernel and accounted for every single period. 
+
+\begin{algorithm}
+\caption{Period Bound Tracing}\label{alg:pbt}
+\begin{algorithmic}
+\Require Task bound by the CFS Bandwidth controller
+\Require $quota != max$
+\Require $recommend.status == true$
+\State $tot\_runtime \gets 0$
+\State $yeildtime \gets 0$
+% \State $N \gets n$
+\While{$curr\_period \leq default\_period$}
+\If{$target\_runtime$ is assigned}
+    \State $tot\_runtime \gets tot\_runtime + runtime\_slice $
+\EndIf
+\EndWhile
+\State $yeildtime \gets period - tot\_runtime$
+\end{algorithmic}
+\end{algorithm}
+
+As described in Algorithm \ref{alg:pbt}, in this approach, only the runtime duration is accounted for, while the yield (idle) duration is implicit at the period boundary. For example, in a 100ms period, if the cumulative runtime slices accounted for is 30ms, then the yield duration is 100 - 30 = 70ms. This inability to consider the period, does not report the true utilization of an application and hence tunes incorrectly for the quota as well. While this approach incurs the same drawbacks discussed in section \ref{sec:limitations_quota_only}, it does present utility in some cases when applications experience throttle described in section \ref{sec:throttle_tracing}
+
+% The implications of using this algorithm are that only the quota can be tuned for a predetermined constant period. In addition, this inability to consider the period, does not report the true utilization of an application and hence is inadequate in modelling the application behavior as described in Section 3.1. 
+
+% \hq{I feel like it's not because of this algorithm that only the quota can be tuned, i.e., this is not the implication. It's that this monitoring approach does not report the "true" utilization, i.e., it misses the case that the process may want to run but it's simply throttled within each period.}
+
+% \tianyin{I think this solution is just a strawman so I think it can be placed here with the goal of building the next, real one.}
+
+% \tianyin{The remaining should go to a motivation section}
+% \textbf{Shortcoming of the approach.} Aggregating runtime within a single period although simple and fast can be an unreliable approach and can lead to an uneven distribution of traced runtime-yield time information, as runtime can span over periods. Moreover, since a fixed period is always used, an application may not fit into the default periodicity which can further lead to a seemingly erratic distributions of utilization even in a stable running workload.
+
+% Consider an hypothetical scenario wherein a workload presents a uniform run-yield time behaviour of 40 ms runtime and 30 ms idle time. Assume the user sets the period = quota = 100 ms = 1000 millicores, which is sufficient for the current workload. The period bound tracing algorithm functions as follows for the first three periods:
+% \begin{itemize}
+%     \item\textbf{1st period}: 40 ms runtime, 30 ms yield time, and 30 ms runtime => Cumulative runtime = 70 ms
+%     \item\textbf{2nd period}: residual 10 ms runtime, 30 ms yield time, 40 ms runtime, and 20 ms yield time => Cumulative runtime = 50 ms
+%     \item\textbf{3rd period}: residual 10 ms yield time, 40 ms runtime, 30 ms yield time, and 20 ms runtime => Cumulative runtime = 60 ms
+% \end{itemize}
+
+% Assuming our goal is to minimize CPU entitlement for maximal performance, in this case the CFS bandwidth controller limits must be set to a quota of 70ms and a period of 100ms, or 700 millicores. However, this approach will result in severely unused quota in periods 2 and 3. This over-provisioning of resources leads to a direct cost to consumer for the CPU that they may not use for the majority of its running time. In contrast, if the workload behaviour was well understood; the ideal entitlement would have a quota of 40ms and a period of (40+30)=70ms, or 570 millcore. This is also a fundamental shortcoming for the state-of-the-art container telemetry.
+
+
+% In summary, relying solely on period-bound tracing is inadequate for modeling application runtime behavior and can result in over or under allocation of CPU resources. Therefore to compliment this we have designed a period agnostic tracing model as well.
+
+\subsection{Period agnostic tracing}
+While our evaluation of period-bound tracing (Section \ref{sec:limitations_quota_only}) demonstrates a lightweight and simple approach, it presents significant shortcomings when the periodicity of the applications isn't in line with the default period. Therefore, in this section, we design a period-agnostic tracing model to profile application runtime and yield time behavior whose periodicity can either be lower or greater than the currently defined period boundaries.
+
+\begin{algorithm}
+\caption{Period Agnostic Tracing}\label{alg:pat}
+\begin{algorithmic}
+\Require Task bound by the CFS Bandwidth controller
+\Require $quota \ne max$
+\Require $recommend.status == true$
+\State $accumilated\_runtime \gets 0$
+\State $curr\_yieldtime \gets 0$
+\State $prev\_vruntime\gets 0$
+\While{$\_\_assign\_cfs\_rq\_runtime()$}
+\If{$yieldtime \ne 0$}
+    \State $curr\_yieldtime \gets rq\_clock() - yieldtime$
+\EndIf
+\State $corr\_yieldtime = curr\_yieldtime - prev\_vruntime$
+\Comment{clock keeps ticking from the moment it is queued}
+\If{$accumilated\_runtime \ne 0$ and $corr\_yieldtime \ge cfs\_bandwidth\_slice$}
+    \State $ yeildtime\_hist[idx] \gets corr\_yieldtime$
+    \State $ runtime\_hist[idx] \gets rq\_clock() - accumilated\_runtime - corr\_yieldtime$
+    \State $ idx \gets idx + 1$
+    \State $ accumilated\_runtime \gets 0$
+\EndIf
+\State $curr\_yieldtime \gets rq\_clock() $
+\State $prev\_vruntime\gets vruntime $
+\If{$accumilated\_runtime == 0$}
+    \State $accumilated\_runtime \gets rq\_clock() $
+\EndIf
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+The core idea described in algorithm \ref{alg:pat}, is that we want to account for runtime per runqueue until it self-yields. However, the runqueue can yield for several reasons, with the most common reason being the expiry of the CFS bandwidth slice. Therefore, the primary approach we employ is to account for runtime when the yield duration is greater than the scheduler bandwidth slice.
+
+To achieve this, two runqueue clocks are maintained: one for runtime and another for yield time. The yield time clock is primed each time a runqueue is assigned a vruntime. The runtime clock is primed either if it wasn't previously primed before or when a legitimate self-yield is identified. In a low contention scenario, naturally, when a runqueue has expired its CFS bandwidth slice but needs to run and has its quota remaining, it will be assigned runtime to be scheduled in the next bandwidth slice. Therefore, to identify a self-yield, we observe when the runqueue is scheduled and check if the yield time clock is greater than the scheduler bandwidth slice. This, along with the check of the absence of throttle in the past periods and subtracting the current yield duration, signifies the current periodic runtime cycle.
+
+\subsection{Tracing during throttle}
+\label{sec:throttle_tracing}
+When a task requires more runtime than the user-set quota within a period, it will be involuntarily yielded due to throttle. This means that the task is evicted from the queue for the rest of the period and is re-queued only in the next period when the quota replenishes.
+
+We characterize throttle behavior into three main categories: light, medium, and high degrees of throttle, and describe strategies for tracing during these conditions.
+
+During light throttle, the period-agnostic algorithm will experience higher runtime and yield time durations, potentially leading to incorrect recommendations. To accurately model the runtime behavior, we must take into account the amount of time the task was throttled and make corrections based on that. As described in Algorithm 3, we maintain a throttle clock to record the amount of time a task stayed throttled. When the task is reset in the queue to be unthrottled, we adjust the yield time and runtime clocks forward by the duration the runqueue was throttled for.
+
+\begin{algorithm}
+\caption{Throttle correction}\label{corr}
+\begin{algorithmic}
+\Require $quota \ne max$
+\Require $recommend.status == true$
+\Procedure{throttle\_cfs\_rq}{cfs\_rq}
+  \State $cfs\_rq.throttled\_clock \gets rq\_clock(rq)$
+\EndProcedure
+
+\Procedure{unthrottle\_cfs\_rq}{cfs\_rq}
+  \State $curr\_throttle\_time \gets rq\_clock(rq) - cfs\_rq.throttled\_clock$
+  \If{$yieldtime \ne 0$ and $accumulated\_runtime \ne 0$}
+       \State $yieldtime \gets curr\_throttle\_time + yieldtime$
+       \State $accumulated\_runtime \gets curr\_throttle\_time + accumulated\_runtime$
+  \EndIf
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+Experiencing some amounts of throttle is inevitable in the life-cycle of an auto-tuned application and algorithm \ref{corr} successfully mitigates the effects of capturing the runtime duration. In the case an application experiences medium amounts of throttle, momentarily changing the application behavior; then period bound tracing provides a useful recommendation baseline. As deliberated in the past sections, often period bound tracing may result in higher, incorrect entitlements especially in the case of altered behavior. However, this can significant aid in quickly reducing throttle and stabilizing the workload for a more accurate runtime profiling.
+
+Lastly, if an application experiences high degrees of throttle, then the application behavior itself can be severely affected, and correction factors may prove to be inadequate. Therefore, as described in Algorithm \ref{quota_scaling}, when throttle constitutes the majority ($\ge 50\%$) of the period-bound history size, then in that case, for a short duration of time (five bandwidth periods), the quota is scaled to over-provision for the application to stabilize the tracing. The amount of overprovision is determined by an exponential scaling factor of 2 CPUs. Once a valid runtime is discovered, the over-entitlement-based tracing is disabled.
+\begin{algorithm}
+\caption{Quota Scaling}\label{quota_scaling}
+\begin{algorithmic}
+\Require $quota \ne max$
+\Require $recommend.status == true$
+\State $ulim\_interval \gets 5$
+\State $curr\_throttle \gets 0$
+\State $cpu\_scale \gets 1$
+
+\Procedure{do\_sched\_cfs\_period\_timer}{}
+  \State $throttled = !list\_empty(throttled\_cfs\_rq)$
+  \If{$curr\_throttle \ge period\_bound\_history$}
+    \If{ $ulim\_interval \ge 0$}
+        \State $quota \gets quota + cpu\_scale$
+        \State $ulim\_interval \gets ulim\_interval - 1$
+        \State $cpu\_scale \gets cpu\_scale * 2$
+     \Else
+        \State $ulim\_interval \gets 5$
+        \State $cpu\_scale \gets 1$
+    \EndIf
+  \EndIf
+
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\section{CPU Period and Quota Recommendation}
+% \hq{Change the title to "CPU Period and Quota Recommendation"?}\\
+% \tianyin{I assume that decision making is to figure out the best period and quota. It's not?}
+% \pratik{It is, updated the text to make that clear}
+Runtime information for both Period-Based and Period-Agnostic tracing is stored in history buffers. When the user-tunable history buffers are full, the decision-making algorithm considers this path behavior to determine the best period and quota limits for the future.
+
+To determine the quota-period combination, the 99th percentile of runtime and yield time duration are calculated from both period-based and agnostic history buffers. Quota is attributed to the runtime, while the period is determined by the summation of runtime and yield time. The ratio of quota to period is compared for both period-bound and period-agnostic techniques, and the lower ratio, indicating lower CPU limits, is then recommended to be applied.
+
+If the \textbf{recommended.status} CPU Cgroup interface (described in Section \ref{sec:multicore}) is set to \textit{recommend-only} mode, only the \textbf{recommend.max} is updated for the user to manually make a decision based on these insights. If the status is set to \textit{auto mode}, the period and quota of the task are updated as well, and tracing for the following periods is based on this new quota and period.
+
+\section{Multicore Support}
+\label{sec:multicore}
+Tasks can often spawn multiple threads simultaneously on multiple cores. Therefore, for period-agnostic tracing, CATCloud profiles all the RQs separately and models the quota and period for each. During each assign\_cfs\_rq, it goes through the entire list of active RQs and computes cumulative runtime and period, which forms the period-agnostic recommendation. However, as described in the past sections RQs can yield briefly for several reasons from scheduler ticks to throttle. This can lead to some genuine RQs that are active not being present in the list during the collation of all the RQs, resulting in incorrect CPU limit recommendations. To mitigate this behavior, RQs are added to the active list immediately when they appear and are persisted for the entirety of a single period, after which the contents of the active list are purged. This ensures that all active RQ behaviors are considered when a decision is made. One downside of this approach is that RQs that have been dequeued and will not enqueue anytime soon can influence the recommendation and cause over-entitlement. However, this case is less frequent, and even in the cases of over-entitlement, the effect will be brief due to the dequeued RQ being removed from consideration within the span of a single bandwidth period.
+
+\section{Implementation}
+We enhance the v6.3 Linux scheduler by introducing per-bandwidth-controller, per-RQ tracking of runtime and yield. Within the \texttt{struct cfs\_rq}, we implement heuristics to monitor behavior independent of time periods. Each RQ includes raw current clock values, historical data, and the 99th percentile values of both runtime and yield.  Additionally, we extend the \texttt{struct cfs\_bandwidth} to incorporate similar statistics for period-bound tracing mechanisms. Furthermore, we integrate variables for externally controlled interfaces of status, history, and max values within the same structure.
+
+
+
+% \subsection{Interface}
+
+\textbf{Interface.} We augment the Linux CPU Cgroup interface to add user-space knobs to control CATCloud.
+\dirtree{%
+.1 /sys/fs/cgroup/cpu.
+.2 cpu.recommend.status.
+.2 cpu.recommend.history.
+.2 cpu.recommend.max.
+}
+
+The extended controls and their definitions are as follows:
+\begin{itemize}
+    \item\textbf{cpu.recommend.status}: Tribool value <0/1/2>
+        \begin{itemize}
+            \item $0 \to off$: Disable CATCloud
+            \item $1 \to recommend\_only\_mode$: Enable tracing, export resource recommendations to cpu.recommend.max
+            \item $2 \to auto\_mode$: Enable tracing, and automatically apply period and quota recommendations to cpu.max
+        \end{itemize}
+
+    \item\textbf{cpu.recommend.history}:
+        \begin{itemize}
+            \item <period bound history size , period agnostic history size>
+        \end{itemize}
+
+    Size of the history buffer of runtimes for both period bound and period agnostic tracing.
+
+    The core idea behind the history sizes is to control the aggressiveness of suggestions for different kind of applications. It can so be that if the history is set too small then accurate runtime behavior may not be captured and if it is too large then stale past may taint the buffer.
+    % The core idea is to provide control over the algorithm aggressiveness as if the history is too small then accurate runtime behavior may not be captured and if it is too large then stale past may taint in capturing current runtime behavior.
+    \item\textbf{cpu.recommend.max}:
+        \begin{itemize}
+            \item <recommended quota>, <recommended period>
+        \end{itemize}
+    Read only file that mimics the cpu.max file format, that presents the current quota and period recommended by CATCloud.
+
+    The cpu.recommend.max file is updated both in the recommend\_only mode as well as the auto mode for the interface cpu.recommend.status with the difference that the recommendations are only suggested for the former while automatically applied for the latter. In the latter case cpu.max and cpu.recommend.max will display the same entitlement.
+\end{itemize}

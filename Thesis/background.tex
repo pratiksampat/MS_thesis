@@ -1,0 +1,46 @@
+\tianyin{Need to organize the writing around the discrepancy of the interface/abstraction, instead of talking about Linux and Kubernetes.}
+
+\section{CPU Bandwidth as the OS Abstraction}
+\label{sec:os_interface}
+
+The OS kernel exposes CPU time  through the CPU bandwidth controller.
+The Linux OS kernel implements functionality to limit CPU utilization as a function of CPU bandwidth time \cite{turner_cpu_2010} wherein task groups are assigned a quota-period combination. Quota is the maximum allocated time a task group can run for within a period. 
+\todo{Give clear definition.
+\begin{itemize}
+    \item Quota: 
+    \item Period:
+\end{itemize}
+}
+The bandwidth controller maintains a notion global quota, local quota, and bandwidth slice. \tianyin{Give clear definition:
+\begin{itemize}
+    \item Global quota
+    \item Local quota
+    \item Bandwidth slice:
+\end{itemize}}
+\tianyin{I have trouble to map the quota-period mental model (which I believe is a conceptual model) to this global-local-quota-slice mental model (the implementation?).}
+The bandwidth controller is integrated with the existing scheduler and the control interfaces are exposed via Cgroup to the userspace \cite{noauthor_control_nodate}. We illustrate the working of the bandwidth controller using an example illustrated in Figure \ref{fig:cfs_bandwidth}. In this example, the quota is set to 15 ms and the period is set to 100 ms, and the bandwidth slice is 5ms. For each runqueue, a local quota is assigned runtime in the form of bandwidth slice. When the local quota of 5 ms is exhausted, more is then borrowed from the global quota post which the task can continue running. \tianyin{I don't really understand this sentence.} Once the global quota is exhausted at 15 ms \tianyin{so ``quota'' means ``global quota''? Local quota is just slice?}, the task group is then throttled until the next period
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{paper//Figures//Background/cfs_bandwidth.png}
+    \caption{Linux bandwidth controller \tianyin{no idea what each color means; don't understand the term ``borrow''}}
+    \label{fig:cfs_bandwidth}
+\end{figure}
+\begin{figure}
+    
+    
+\end{figure}
+By default, the bandwidth slice = 5 ms, period = 100 ms, and quota is set to max which lets regular applications run unrestricted. In addition to CPU limit, the cgroup also provides statistics regarding usage, pressure, throttle, etc.
+
+\section{Millicpu as the Cloud Abstraction}
+
+\tianyin{Start from the abstraction first and then using Kubernetes as an example of the implementation.}
+In production cloud, containers are a popular mode of deployment. Kubernetes (K8s) \cite{noauthor_production-grade_nodate} is an orchestration platform designed for automated scaling, deployment, and management of containerized applications. The fundamental building block of Kubernetes is pods. Pods are encompass the containers of an application with defined resource limits. We describe the core interfaces of CPU control and their management via autoscaling techniques
+
+\textbf{Millicpu or Millicore.} The limits to the CPU resource is defined as a unit of millicpu \cite{noauthor_resource_nodate}. A millicpu is defined as a thousandth part of a physical CPU worth of runtime. Within the OS, millicpu translates to the ratio of quota to the period. For eg. 500 millicpu = 0.5 vCPU = 50 ms of quota, 100 ms of period. When a user tunes the millicpu limits, the period is always kept constant, likely to the default 100 ms while the quota is tuned proportionally to match the ratio.
+
+\section{Implications}
+
+\tianyin{Start from a high level. Is autoscaling the only implication? It's completely fine we only address autoscaling in this paper, but as a background section this needs to be broad.}
+
+\textbf{Pod Autoscaling.} As estimating resource limits upfront proves challenging for applications, Kubernetes (K8s) offers functionality to autoscale resource limits over time based on application behavior. Specifically, for CPU resources, the Kubernetes Vertical Pod Autoscaler (VPA) \cite{noauthor_kubernetes_nodate} continuously monitors resource utilization within defined windows and offers recommendations based on statistical analyses such as the 50th and 95th percentiles of past CPU usage. However, the K8s VPA suffers from several shortcomings. Firstly, each time limits are updated, pods must be restarted, which can significantly disrupt application workflows. Secondly, the current implementation of VPA cannot be deployed alongside the horizontal pod autoscaler, a critical functionality in distributed systems on the cloud. In the following section, we explore other state-of-the-art autoscaling solutions. Although these solutions do not share the aforementioned shortcomings, they still struggle to efficiently scale CPUs due to the fundamental disconnect between OS and cloud interfaces.

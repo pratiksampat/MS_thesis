@@ -1,0 +1,145 @@
+\hq{
+Our experiments addressed the following research questions:
+\begin{itemize}
+    \item Does CATCloud provide the same level of performance (regarding latency and throughput) with less CPU allocation? To understand if CATCloud can save resources by better handling throttling according to application behaviors.
+    \item Does CATCloud achieve better performance (lower latency or higher throughput) when CPU allocations are the same? To understand how much benefit each application enjoys from less throttling due to misconfigured CPU periods.
+    \item Can CATCloud handle bursty workloads (workload variation and load spikes)? There can be latency spikes but how fast CATCloud is able to autoscale compared to baselines?
+    \item How does CATCloud perform in multicore settings?
+    \item How does CATCloud perform in multi-application settings? (not sure if applicable)
+    \item How does the CATCloud tracing component perform in light, medium, and high degrees of throttling?
+    \item What is the overhead of CATCloud?
+\end{itemize}
+}
+
+\hq{
+Plan\\
+Exp (1): For a given workload (e.g., fixed application + fixed arrival rate), set an SLO on latency or throughput, and compare if CATCloud requested less CPU allocation to meet SLO than the baselines.
+\\
+Exp (2): For a given workload, set the CPU allocations the same, and compare if CATCloud can better configure periods and quota according to application behaviors to achieve higher throughput or lower latency than the baselines.
+\\
+Exp (3): For a workload spike, see if CATCloud and baselines can autoscale to mitigate the performance degradation and avoid overprovisioning, compare (1) how much is the degradation, (2) how fast each method mitigates the degradation,
+and (3) how much CPU allocation is used during the autoscaling process.
+Then after the spike, see if CATCloud and baselines can scale down, and if so, what's the duration and the resource requested.
+\\
+Exp (4): Multicore
+\\
+Exp (5): Multi-application sharing cores
+\\
+Exp (7): Overhead of CATCloud (should be related to how frequently CATCloud does the profiling and makes the recommendation for period/quota)
+\\
+Exp (8): Microbenchmark to understand how much benefit CATCloud can lead to when the Ebizzy traffic is scaled from 0 to 100\%. CPU or I/O workloads.
+\\
+Exp (9): Ablation study on several parameters used in CATCloud, e.g., (1) the 99th percentile of runtime and yield time duration is used for recommendation, (2) the length of the history buffer, (3) what if history buffer is empty, (4) parameters in Algo. 4 ..., (5) CATCloud tracing component in light, medium, and high degrees of throttling
+}
+
+We assess CATCloud's capacity to achieve peak performance with reduced resource utilization compared to state-of-the-art heuristic and ML-based autoscalers. Across various applications, CATCloud consistently maintains the lowest latency while utilizing up to 56\% fewer CPU resources for Sleeping-ebizzy, 2.6\% less CPU entitlement for web-search, and 25.33\% lower CPU usage for media-streaming in Cloudsuite. In the case of the HotelReservation benchmark under simple load conditions, CATCloud outperforms existing solutions by up to 10\% in terms of performance and requires up to 8\% fewer CPU resources. Moreover, under dynamic load conditions, CATCloud demonstrates a performance advantage of up to 56\% compared to its contemporaries.
+
+\section{Methodology}
+
+\textbf{Benchmark applications.} We deploy three cloud applications: \textit{(1)} Sleeping Ebizzy microbenchmark \cite{bhat_pratiksampatsleeping-ebizzy_2014} to simulate webpage traffic. \textit{(2)} EPFL CloudSuite \cite{ferdman_clearing_2012} - web search and media streaming benchmarks, and Hotel-Reservation from DeathStarBench \cite{gan_open-source_2019}. These applications are representative of real-world web-based cloud applications. These display varied application behaviors from streaming to microservices that demonstrate stateless and data services.
+
+\textbf{Comparison.} CATCloud is compared to \textit{(1)} Kubernetes CPU Vertical Pod Autoscaler (K8s VPA) \cite{noauthor_kubernetes_nodate}, \textit{(2)} Holt-Winters exponential smoothing (HW), and \textit{(3)} Long Short-Term Memory (LSTM) autoscaler. \cite{wang_predicting_2021}.
+
+K8s VPA periodically (15 seconds) monitors the CPU utilization and recommends scale-up or scale-down millicore limits for the pod that it is attached to (every 300 seconds). The autoscaler also maintains a history of past runs and recommends initial limits based on its past run behavior as well.
+
+We implement the the HW and LSTM strategies presented in \cite{wang_predicting_2021} and integrate it into a userspace autoscaler for real-time prediction. The implementation uses the weights supplied as-is and makes a recommendation approximately every 3 minutes.
+
+% To evaluate the best-case performance, we compute the 99 percentile CPU utilization using docker stats (Docker P99) for the course of an applications entire run. This is a retrospective approach, wherein the workload for its first deployment runs unrestricted. During the unrestricted run, CPU utilization is collected at the granularity of 100ms. The subsequent run with the same runtime parameters then bear the 99P utilization as its CPU entitlement.
+
+
+\textbf{Experiment setup.} We deploy CATCloud on a patched Linux 6.3, on a testbed of x86 KVM QEMU - 32 Cores, 32 GB. The benchmarks are containerized unrestricted in all resources except CPU with are autoscaled. Deployments are performed on the original container images and is managed by Docker and Kubernetes. K8s VPA is set up as an add-on to the pod deployment. HW and LSTM are tested using a custom userspace autoscaler that resides in the host, monitors the telemetry, and applies the recommendation directly on the Cgroup interface. In the case of CATCloud, we identify the container's cgroup that requires to be auto-tuned and activate tracing and recommendation using the cpu.recommend.status knob.
+
+% For docker P99 -  CPU utilization is captured via a bash script in user-space for the entirety of the run and post the run 99 percentile CPU utilization is computed and new limits are set for the next run. 
+
+\section{Cloud Benchmarks}
+
+\textbf{sleeping ebizzy microbenchmark.} Ebizzy \cite{henson_ebizzy_2008} is a web traffic simulation benchmark. We used a custom variant \cite{bhat_pratiksampatsleeping-ebizzy_2014} to introduce burstiness. Starting with the experiment described in Section 
+\ref{sec:limitations_quota_only}, we evaluate the two baselines against CATCloud (Figure \ref{ebizzy_latency} for latency, Figure \ref{ebizzy_ent} CPU limits) to ascertain if our approach is able to attain the hypothetical CPU limits minima while sustaining maximum performance (lowest latency).
+K8s VPA recommends and autotunes the median CPU limits to 200 millicores, while also achieving close to the ideal latency. HW and LSTM perform poorly and require 164 and 175 millicores respectively. Lastly CATCloud, achieves ideal latency, while median CPU limits recommended is quota=22 ms, period=171ms (128 millicore). CATCloud offers the same performance characteristics of k8s for a further 56.25\% lower CPU limits. In terms of HW and LSTM, CATCloud performs 150\% better in terms of latency with 22\% and 26.8\% CPU allocation improvements.
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/ebizzy_latency.png}
+  \caption{Sleeping Ebizzy - latency (lower is better)}\label{ebizzy_latency}
+  \Description[Sleeping Ebizzy - latency]{}
+  \end{figure}
+
+  \begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/ebizzy_CPU.png}
+    \caption{Sleeping Ebizzy - CPU entitlement millicores (lower is better)}\label{ebizzy_ent}
+    \Description[Sleeping Ebizzy - CPU entitlement (millicores]{}
+    \end{figure}
+
+  % \begin{figure}[h]
+  %   \centering
+  %   \includegraphics[scale=0.21]{paper/Figures/Evaluation/Sleeping_ebizzy_combined.png}
+  %   \caption{Sleeping Ebizzy benchmrk latency and CPU)}
+  %   \Description[Sleeping Ebizzy - CPU entitlement (millicores]{}
+  %   \end{figure}
+
+
+\textbf{EPFL Cloudsuite.} A modern benchmarking suite to evaluate popular cloud services such as data-serving, web-search, media streaming, etc. \cite{ferdman_clearing_2012}. Within Cloudsuite we evaluate two compute heavy benchmarks - web search and media streaming for varying degrees of resource utilization scale. The results are normalized for ease of analysis. The metrics of measurement here are throughput and CPU entitlement.
+
+In the case of a stable running web-search benchmark (Figure \ref{epfl_web-search} - K8s VPA, HW and LSTM, all performs close to peak performance. K8s VPA requires 20\%, LW 8.6\%, and LSTM 2.6\% higher CPUs compared to CATCloud.
+
+In the case of the media streaming benchmark (Figure \ref{epfl_media}) - K8s VPA performs 152.5\% worse in terms of performance, with HW and LSTM performing at par to peak. In terms of efficiency, K8s, requires requires 25.33\%, HW requires 62.09\%, and LSTM 81.25\% higher higher CPU entitlement compared to CATCloud.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/EPFL_websearch.png}
+  \caption{EPFL Cloudsuite - Web search}\label{epfl_web-search}
+  \Description[EPFL Cloudsuite - Web search]{}
+  \end{figure}
+
+  % \begin{figure}[h]
+  %   \centering
+  %   \includegraphics[width=1\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/EPFL_media_streaming.png}
+  %   \caption{EPFL Cloudsuite - Web search CPU entitlement}\label{epfl_media}
+  %   \Description[EPFL Cloudsuite - Web search CPU entitlement]{}
+  %   \end{figure}
+
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/EPFL_media_streaming.png}
+      \caption{EPFL Cloudsuite - Media Streaming} \label{epfl_media}
+      \Description[EPFL Cloudsuite - Media Streaming]{}
+      \end{figure}
+
+\textbf{Hotel Reservation - DeathStarBench.} The hotelReservation benchmark as part of the DeathStarbench \cite{gan_open-source_2019} suite simulates a microservice application. The workload contains many services that can be either independently or collectively controlled. We choose to control the CPU entitlement recommendation individually based on each service (recommend, search, reserve, etc). This allows finer garrulity in monitoring (for all the baselines), and avoids tuning and tainting of services that either display low or high levels of utilization. The results are normalized for ease of analysis. The metrics of measurement here are P99 Latency and CPU entitlement.
+
+
+If the results are viewed from the best case recommendations from all the autoscalers (Figure \ref{deathstar_overall}) on a stable load, CATCloud performs better than K8s (10\%), HW (11.95\%) and LSTM(10.5\%) in terms of latency. In terms of efficiency, K8s, requires requires 8\%, HW requires 12.4\%, and LSTM 8.9\% higher higher CPU entitlement compared to CATCloud.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/deathstar_overall.png}
+  \caption{DeathStarBench - Hotel Reservation}\label{deathstar_overall}
+  \Description[DeathStarBench - Hotel Reservation]{}
+  \end{figure}
+
+When dealing with long-running workloads characterized by fluctuations, the limitations of algorithmically dense approaches become evident. Analysis of figures \ref{deathstar_perf} and \ref{deathstar_cpu} reveals significant performance drops occurring between the 6-12 minute marks in response to load changes. During this period, K8s VPA, HW, and LSTM consistently either overprovision or underprovision CPU resources. As a result, performance regresses by up to 56\% compared to CATCloud, which demonstrates remarkable consistency by maintaining performance close to peak levels due to its high reactivity.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/deathstar_series_performance.png}
+  \caption{DeathStarBench - Hotel Reservation Performance higher is better}\label{deathstar_perf}
+  \Description[DeathStarBench - Hotel Reservation]{}
+  \end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.5\linewidth]{paper/Figures/Evaluation/HW_LSTM_Data/deathstar_series_cpu.png}
+  \caption{DeathStarBench - Hotel Reservation CPU lower is better}\label{deathstar_cpu}
+  \Description[DeathStarBench - Hotel Reservation CPU lower is better]{}
+  \end{figure}
+
+
+% \begin{itemize}
+%   \item \textbf{Microbenchmark:} To motivate on the case where it is impossible for the current solutions to ever deduce this entitlement decision. Ebizzy seems like a good candidate for this controlled experiment
+
+%   \item \textbf{EPFL CloudSuite:} To show the cloud workload usecase - web search and media streaming. Both of which have erratic CPU utilizations
+
+%   \item \textbf{Deathstarbench:} To show the microservices usecase. Hotel Reservation can be one of those benchmarks
+
+%   \item \textbf{Serverless:} Pick one or two serverless workloads
+% \end{itemize}
